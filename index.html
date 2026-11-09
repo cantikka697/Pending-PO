@@ -177,13 +177,13 @@ document.addEventListener('DOMContentLoaded', () => {
 async function initSupabase() {
   try {
     if (!window.supabase) {
-      alert('Koneksi internet diperlukan untuk memuat library Supabase. Pastikan HP terhubung ke internet.');
+      alert('Koneksi internet diperlukan.');
       return;
     }
     supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
     await initApp();
   } catch (err) {
-    alert('Gagal menghubungkan ke Supabase: ' + err.message);
+    console.error(err);
   }
 }
 
@@ -197,19 +197,20 @@ async function initApp() {
     renderSalesList();
     document.getElementById('syncStatus').textContent = '🟢 Online (Supabase)';
   } catch(err) {
-    alert('Koneksi Supabase gagal: ' + err.message);
+    console.error(err);
+    document.getElementById('syncStatus').textContent = '🔴 Koneksi Gagal';
   }
 }
 
 async function loadItemTypes() {
   const { data, error } = await supabase.from('item_types').select('*').order('name', { ascending: true });
-  if (error) throw error;
+  if (error) console.error(error);
   if (data) state.itemTypes = data;
 }
 
 async function loadSales() {
   const { data, error } = await supabase.from('sales').select('*').order('name', { ascending: true });
-  if (error) throw error;
+  if (error) console.error(error);
   if (data) state.sales = data;
 }
 
@@ -228,9 +229,12 @@ async function loadPOData() {
     `)
     .order('created_at', { ascending: false });
 
-  if (error) throw error;
-
-  state.pos = data || [];
+  if (error) {
+    console.error(error);
+    state.pos = [];
+  } else {
+    state.pos = data || [];
+  }
   renderDashboard();
   renderPOTable();
   renderPendingTable();
@@ -591,12 +595,11 @@ function showToast(msg) {
 }
 
 function escapeHtml(str) {
-  return String(str || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, &quot;).replace(/"/g, '&quot;');
+  return String(str || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
 function setupNavigation() {
   const buttons = document.querySelectorAll('#navigation button');
-  buttons.forEach(bt => {})
   buttons.forEach(btn => {
     btn.addEventListener('click', () => {
       const pageId = btn.getAttribute('data-page');
