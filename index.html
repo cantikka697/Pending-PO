@@ -160,8 +160,459 @@ tr:hover td{background:#fafcff}
 </div>
 <div id="toast"></div>
 
-<script src="config.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-<script src="app.js"></script>
+<script>
+const SUPABASE_URL = "https://vmxcolgppjxitbilruxg.supabase.co";
+const SUPABASE_KEY = "sb_publishable_1U7AieGT23hFHZTxB5yNog_N4pwtcSj";
+
+let supabase = null;
+let state = { pos: [], itemTypes: [], sales: [] };
+
+document.addEventListener('DOMContentLoaded', () => {
+  setupNavigation();
+  setupEventListeners();
+  initSupabase();
+});
+
+async function initSupabase() {
+  try {
+    if (!window.supabase) {
+      alert('Koneksi internet diperlukan untuk memuat library Supabase. Pastikan HP terhubung ke internet.');
+      return;
+    }
+    supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+    await initApp();
+  } catch (err) {
+    alert('Gagal menghubungkan ke Supabase: ' + err.message);
+  }
+}
+
+async function initApp() {
+  if (!supabase) return;
+  try {
+    await loadItemTypes();
+    await loadSales();
+    await loadPOData();
+    renderMasterTypes();
+    renderSalesList();
+    document.getElementById('syncStatus').textContent = '🟢 Online (Supabase)';
+  } catch(err) {
+    alert('Koneksi Supabase gagal: ' + err.message);
+  }
+}
+
+async function loadItemTypes() {
+  const { data, error } = await supabase.from('item_types').select('*').order('name', { ascending: true });
+  if (error) throw error;
+  if (data) state.itemTypes = data;
+}
+
+async function loadSales() {
+  const { data, error } = await supabase.from('sales').select('*').order('name', { ascending: true });
+  if (error) throw error;
+  if (data) state.sales = data;
+}
+
+async function loadPOData() {
+  const { data, error } = await supabase
+    .from('pos')
+    .select(`
+      *,
+      po_items (
+        id,
+        item_type_id,
+        qty,
+        bonus,
+        item_types ( id, name )
+      )
+    `)
+    .order('created_at', { ascending: false });
+
+  if (error) throw error;
+
+  state.pos = data || [];
+  renderDashboard();
+  renderPOTable();
+  renderPendingTable();
+}
+
+function renderDashboard() {
+  document.getElementById('dpo').textContent = state.pos.length;
+  
+  let totalQty = 0;
+  let totalBonus = 0;
+  let pendingCount = 0;
+  
+  state.pos.forEach(p => {
+    if (p.status === 'Pending PO') pendingCount++;
+    (p.po_items || []).forEach(i => {
+      totalQty += (i.qty || 0);
+      totalBonus += (i.bonus || 0);
+    });
+  });
+
+  document.getElementById('dqty').textContent = `${totalQty} (+${totalBonus} Bonus)`;
+  document.getElementById('dpend').textContent = pendingCount;
+}
+
+function renderPOTable() {
+  const container = document.getElementById('poList');
+  if (!container) return;
+
+  if (state.pos.length === 0) {
+    container.innerHTML = '<p class="dim">Belum ada data PO. Klik "+ Tambah PO Baru" untuk membuat pesanan.</p>';
+    return;
+  }
+
+  let html = `
+    <table>
+      <thead>
+        <tr>
+          <th>No. PO</th>
+          <th>Toko / Klien</th>
+          <th>Kota</th>
+          <th>Rincian Barang, Qty & Bonus</th>
+          <th>Ekspedisi</th>
+          <th>Status</th>
+          <th class="no-print">Aksi</th>
+        </tr>
+      </thead>
+      <tbody>
+  `;
+
+  state.pos.forEach(po => {
+    const itemsSummary = (po.po_items || []).map(i => {
+      const typeName = i.item_types?.name || 'Barang';
+      const bonusText = i.bonus > 0 ? ` <span style="color:#2563eb;font-weight:bold">(+Bonus: ${i.bonus})</span>` : '';
+      return `• ${escapeHtml(typeName)}: <b>${i.qty}</b> pcs${bonusText}`;
+    }).join('<br>');
+
+    html += `
+      <tr>
+        <td><b>${escapeHtml(po.po_number)}</b></td>
+        <td>${escapeHtml(po.customer_name || '-')}</td>
+        <td>${escapeHtml(po.city || '-')}</td>
+        <td>${itemsSummary || '-'}</td>
+        <td>${escapeHtml(po.expedition_main || '-')}${po.expedition_transit ? ' (Transit: ' + escapeHtml(po.expedition_transit) + ')' : ''}</td>
+        <td><span class="pill ${po.status === 'Selesai' ? 'done' : ''}">${escapeHtml(po.status)}</span></td>
+        <td class="no-print">
+          <button class="danger" onclick="deletePO(${po.id})">Hapus</button>
+        </td>
+      </tr>
+    `;
+  });
+
+  html += '</tbody></table>';
+  container.innerHTML = html;
+}
+
+function renderPendingTable() {
+  const container = document.getElementById('pendingList');
+  if (!container) return;
+
+  const pendingPos = state.pos.filter(p => p.status === 'Pending PO');
+  if (pendingPos.length === 0) {
+    container.innerHTML = '<p class="dim">Tidak ada pesanan status Pending PO saat ini.</p>';
+    return;
+  }
+
+  let html = `
+    <table>
+      <thead>
+        <tr>
+          <th>No. PO</th>
+          <th>Toko / Klien</th>
+          <th>Kota</th>
+          <th>Barang & Bonus Pending</th>
+          <th>Ekspedisi Utama</th>
+        </tr>
+      </thead>
+      <tbody>
+  `;
+
+  pendingPos.forEach(po => {
+    const itemsSummary = (po.po_items || []).map(i => {
+      const typeName = i.item_types?.name || 'Barang';
+      const bonusText = i.bonus > 0 ? ` (+Bonus: ${i.bonus})` : '';
+      return `• ${escapeHtml(typeName)}: <b>${i.qty}</b> pcs${bonusText}`;
+    }).join('<br>');
+
+    html += `
+      <tr>
+        <td><b>${escapeHtml(po.po_number)}</b></td>
+        <td>${escapeHtml(po.customer_name || '-')}</td>
+        <td>${escapeHtml(po.city || '-')}</td>
+        <td>${itemsSummary || '-'}</td>
+        <td>${escapeHtml(po.expedition_main || '-')}</td>
+      </tr>
+    `;
+  });
+
+  html += '</tbody></table>';
+  container.innerHTML = html;
+}
+
+document.getElementById('addPO')?.addEventListener('click', () => {
+  const autoPoNum = 'PO-' + new Date().toISOString().slice(0,10).replace(/-/g,'') + '-' + Math.floor(100 + Math.random() * 900);
+  
+  showModal('Tambah Purchase Order (PO)', `
+    <form id="poForm">
+      <label>Nomor PO</label>
+      <input type="text" name="po_number" value="${autoPoNum}" required>
+
+      <div class="grid2">
+        <div>
+          <label>Nama Toko / Klien</label>
+          <input type="text" name="customer_name" placeholder="Contoh: Toko Tunas Baru" required>
+        </div>
+        <div>
+          <label>Kota Tujuan</label>
+          <input type="text" name="city" placeholder="Contoh: Jember" required>
+        </div>
+      </div>
+
+      <div class="grid2">
+        <div>
+          <label>Ekspedisi Utama</label>
+          <input type="text" name="expedition_main" placeholder="Contoh: Sinar Madu / Indah Cargo">
+        </div>
+        <div>
+          <label>Ekspedisi Transit (Opsional)</label>
+          <input type="text" name="expedition_transit" placeholder="Contoh: Jaya Mas">
+        </div>
+      </div>
+
+      <h3 style="margin-top:15px;margin-bottom:8px">Rincian Type Barang, Qty & Bonus</h3>
+      <div id="itemsContainer"></div>
+      <button type="button" class="secondary" id="addItemBtn" style="margin-bottom:15px">＋ Tambah Baris Barang</button>
+
+      <div style="text-align:right;margin-top:15px">
+        <button type="submit" class="primary">Simpan PO ke Supabase</button>
+      </div>
+    </form>
+  `);
+
+  const container = document.getElementById('itemsContainer');
+  const addItemRow = () => {
+    const row = document.createElement('div');
+    row.className = 'itemrow';
+    row.style.marginBottom = '8px';
+    row.innerHTML = `
+      <select name="item_type_id" required>
+        <option value="">-- Pilih Type Barang --</option>
+        ${state.itemTypes.map(t => `<option value="${t.id}">${escapeHtml(t.name)}</option>`).join('')}
+      </select>
+      <input type="number" name="qty" placeholder="Qty" min="1" required>
+      <input type="number" name="bonus" placeholder="Bonus" min="0" value="0">
+      <button type="button" class="danger remove-item-btn" style="padding:8px 10px">✕</button>
+    `;
+    row.querySelector('.remove-item-btn').onclick = () => row.remove();
+    container.appendChild(row);
+  };
+
+  addItemRow();
+  document.getElementById('addItemBtn').onclick = () => addItemRow();
+
+  document.getElementById('poForm').onsubmit = async (e) => {
+    e.preventDefault();
+    const form = e.target;
+    
+    const poNumber = form.po_number.value.trim();
+    const customerName = form.customer_name.value.trim();
+    const city = form.city.value.trim();
+    const expeditionMain = form.expedition_main.value.trim();
+    const expeditionTransit = form.expedition_transit.value.trim();
+
+    const rows = container.querySelectorAll('.itemrow');
+    const items = [];
+    rows.forEach(r => {
+      const typeId = r.querySelector('[name="item_type_id"]').value;
+      const qty = parseInt(r.querySelector('[name="qty"]').value) || 0;
+      const bonus = parseInt(r.querySelector('[name="bonus"]').value) || 0;
+      if (typeId && qty > 0) {
+        items.push({ item_type_id: parseInt(typeId), qty, bonus });
+      }
+    });
+
+    if (items.length === 0) {
+      alert('Masukkan minimal 1 baris Type Barang dengan Qty valid!');
+      return;
+    }
+
+    try {
+      const { data: newPo, error: poErr } = await supabase
+        .from('pos')
+        .insert([{
+          po_number: poNumber,
+          customer_name: customerName,
+          city: city,
+          expedition_main: expeditionMain,
+          expedition_transit: expeditionTransit,
+          status: 'Pending PO'
+        }])
+        .select()
+        .single();
+
+      if (poErr) throw poErr;
+
+      const itemsToInsert = items.map(it => ({
+        po_id: newPo.id,
+        item_type_id: it.item_type_id,
+        qty: it.qty,
+        bonus: it.bonus
+      }));
+
+      const { error: itemErr } = await supabase
+        .from('po_items')
+        .insert(itemsToInsert);
+
+      if (itemErr) throw itemErr;
+
+      closeModal();
+      showToast('PO & Rincian Bonus berhasil disimpan!');
+      await loadPOData();
+    } catch (err) {
+      alert('Gagal menyimpan PO: ' + err.message);
+    }
+  };
+});
+
+function renderMasterTypes() {
+  const container = document.getElementById('typesList');
+  if (!container) return;
+
+  container.innerHTML = state.itemTypes.map(t => `
+    <div class="mutelist">
+      <span>📦 ${escapeHtml(t.name)}</span>
+      <button class="danger" onclick="deleteType(${t.id})">Hapus</button>
+    </div>
+  `).join('');
+}
+
+function renderSalesList() {
+  const container = document.getElementById('salesList');
+  if (!container) return;
+
+  container.innerHTML = state.sales.map(s => `
+    <div class="mutelist">
+      <span>👤 ${escapeHtml(s.name)}</span>
+      <button class="danger" onclick="deleteSales(${s.id})">Hapus</button>
+    </div>
+  `).join('');
+}
+
+document.getElementById('addTypeForm')?.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const input = e.target.querySelector('input[name="name"]');
+  const name = input.value.trim();
+  if (!name) return;
+
+  try {
+    const { error } = await supabase.from('item_types').insert([{ name }]);
+    if (error) alert('Gagal: ' + error.message);
+    else {
+      input.value = '';
+      await loadItemTypes();
+      renderMasterTypes();
+      showToast('Type Barang ditambahkan');
+    }
+  } catch(err) {
+    alert('Gagal menambah type: ' + err.message);
+  }
+});
+
+document.getElementById('addSalesForm')?.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const input = e.target.querySelector('input[name="name"]');
+  const name = input.value.trim();
+  if (!name) return;
+
+  try {
+    const { error } = await supabase.from('sales').insert([{ name }]);
+    if (error) alert('Gagal: ' + error.message);
+    else {
+      input.value = '';
+      await loadSales();
+      renderSalesList();
+      showToast('Sales ditambahkan');
+    }
+  } catch(err) {
+    alert('Gagal menambah sales: ' + err.message);
+  }
+});
+
+window.deletePO = async (id) => {
+  if (!confirm('Yakin hapus PO ini?')) return;
+  const { error } = await supabase.from('pos').delete().eq('id', id);
+  if (!error) {
+    showToast('PO dihapus');
+    await loadPOData();
+  }
+};
+
+window.deleteType = async (id) => {
+  if (!confirm('Yakin hapus type ini?')) return;
+  const { error } = await supabase.from('item_types').delete().eq('id', id);
+  if (!error) {
+    await loadItemTypes();
+    renderMasterTypes();
+    showToast('Type barang dihapus');
+  }
+};
+
+window.deleteSales = async (id) => {
+  if (!confirm('Yakin hapus sales ini?')) return;
+  const { error } = await supabase.from('sales').delete().eq('id', id);
+  if (!error) {
+    await loadSales();
+    renderSalesList();
+    showToast('Sales dihapus');
+  }
+};
+
+function showModal(title, bodyHtml) {
+  document.getElementById('modalTitle').textContent = title;
+  document.getElementById('modalBody').innerHTML = bodyHtml;
+  document.getElementById('modal').classList.add('on');
+}
+
+function closeModal() {
+  document.getElementById('modal').classList.remove('on');
+}
+
+document.getElementById('closeModal')?.addEventListener('click', closeModal);
+
+function showToast(msg) {
+  const toast = document.getElementById('toast');
+  if (!toast) return;
+  toast.textContent = msg;
+  toast.style.display = 'block';
+  setTimeout(() => { toast.style.display = 'none'; }, 3000);
+}
+
+function escapeHtml(str) {
+  return String(str || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, &quot;).replace(/"/g, '&quot;');
+}
+
+function setupNavigation() {
+  const buttons = document.querySelectorAll('#navigation button');
+  buttons.forEach(bt => {})
+  buttons.forEach(btn => {
+    btn.addEventListener('click', () => {
+      const pageId = btn.getAttribute('data-page');
+      buttons.forEach(b => b.classList.remove('on'));
+      btn.classList.add('on');
+      document.querySelectorAll('.page').forEach(p => p.classList.remove('on'));
+      document.getElementById(pageId)?.classList.add('on');
+    });
+  });
+}
+
+function setupEventListeners() {
+  document.querySelectorAll('[data-refresh]').forEach(btn => {
+    btn.onclick = () => initSupabase();
+  });
+}
+</script>
 </body>
 </html>
